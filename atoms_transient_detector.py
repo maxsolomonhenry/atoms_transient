@@ -49,10 +49,18 @@ class TransientDetector:
     def apply_pad_x(self):
         self.x = pywt.pad(self.x, self.PAD_WIDTH, 'antireflect')
 
+    def undo_boundary_effect(self, cwt_):
+        for s in range(self.S):
+            boundary = int(self.SUPPORT * (s + 1))
+            cwt_[s, :boundary] *= 0
+            cwt_[s, -boundary:] *= 0
+        return cwt_
+
     def set_cwt_(self):
         self.set_wavelet_info()
         self.apply_pad_x()
-        self.cwt_, _ = pywt.cwt(self.x, range(1, self.S + 1), self.wavelet_type)
+        cwt_, _ = pywt.cwt(self.x, range(1, self.S + 1), self.wavelet_type)
+        self.cwt_ = self.undo_boundary_effect(cwt_)
 
     def get_peaks_locs(self, cwt_1scale):
         threshold = self.get_universal_threshold(cwt_1scale)
@@ -86,14 +94,22 @@ class TransientDetector:
         locs_heights = self.sort_row2_dec(locs_heights)
         return locs_heights[0, :], locs_heights[1, :]
 
+    def get_extract_bounds(self, s, t_i):
+        l = int(t_i - np.floor(self.SUPPORT * (s + 1) / 2))
+        u = int(t_i + np.floor(self.SUPPORT * (s + 1) / 2))
+        return l, u
+
     def get_atoms(self, s):
-        cwt_1scale = self.cwt_[s, :]
+        cwt_1scale = copy.deepcopy(self.cwt_[s, :])
         M_l, heights = self.get_sorted_peaks(cwt_1scale)
         N_l = M_l.size
 
         k = 0
-        i = 0
 
+        for i in range(N_l):
+            l, u = self.get_extract_bounds(s, M_l[i])
+            extract = cwt_1scale[l:u]
+            amplitude = self.least_squares(extract, self.dictionary[s])
 
         atom_locs = None
         atom_amps = None
