@@ -103,7 +103,7 @@ class TransientDetector:
         u = int(t_i + np.floor(self.SUPPORT * (s + 1) / 2))
         return l, u
 
-    def get_atoms(self, s):
+    def get_atoms(self, s, search_COIs=None):
         cwt_1scale = copy.deepcopy(self.cwt_[s, :])
         M_l, heights = self.get_sorted_peaks(cwt_1scale)
         N_l = M_l.size
@@ -118,12 +118,17 @@ class TransientDetector:
             extract = cwt_1scale[l:u]
             amplitude = self.least_squares(extract, self.dictionary[s])
 
+            if search_COIs is None:
+                is_in_COI = True
+            else:
+                is_in_COI = self.check_in_COI(M_l[i], search_COIs)
+
             # if True:
             #     plt.plot(extract)
             #     plt.plot(self.dictionary[s])
             #     plt.show()
 
-            if amplitude > self.EPSILON:
+            if (amplitude > self.EPSILON) & is_in_COI:
                 atom_locs.append(M_l[i])
                 atom_amps.append(amplitude)
                 cwt_1scale[l:u] -= extract
@@ -163,7 +168,9 @@ class TransientDetector:
         self.set_J()
         for j in range(1, self.J + 1):
             Ij = self.get_Ij(j)
-            sbar_j = self.get_scale_least_peaks(Ij)
+            sbar = self.get_scale_least_peaks(Ij)
+            sbar_locs, sbar_amps = self.get_atoms(sbar, search_COIs=S1_atom_locs)
+
 
 # Testing and debugging
 def get_test_signal(N=2000, enable_noise=False):
