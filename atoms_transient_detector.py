@@ -44,6 +44,14 @@ class TransientDetector:
     def least_squares(a, b):
         return float(np.dot(a[None, :], b[:, None]) / np.dot(b[None, :], b[:, None]))
 
+    @staticmethod
+    def pad_to_mult(support, mult):
+        if len(support) % mult == 0:
+            return support
+        else:
+            buffer = mult - (len(support) % mult)
+            return np.concatenate((support, np.zeros(buffer)))
+
     def set_wavelet_info(self):
         wavelet = pywt.ContinuousWavelet(self.wavelet_type)
         self.SUPPORT = wavelet.upper_bound - wavelet.lower_bound
@@ -103,6 +111,9 @@ class TransientDetector:
         u = int(t_i + np.floor(self.SUPPORT * (s + 1) / 2))
         return l, u
 
+    def check_in_COI(self, s, query_location, S1_atom_locs):
+        return any(np.abs(query_location - tk) < self.SUPPORT * (s + 1) for tk in S1_atom_locs)
+
     def get_atoms(self, s, search_COIs=None):
         cwt_1scale = copy.deepcopy(self.cwt_[s, :])
         M_l, heights = self.get_sorted_peaks(cwt_1scale)
@@ -121,7 +132,7 @@ class TransientDetector:
             if search_COIs is None:
                 is_in_COI = True
             else:
-                is_in_COI = self.check_in_COI(M_l[i], search_COIs)
+                is_in_COI = self.check_in_COI(s, M_l[i], search_COIs)
 
             # if True:
             #     plt.plot(extract)
@@ -158,6 +169,33 @@ class TransientDetector:
                 lowest = int(query)
         return self.nMAX[lowest]
 
+    def get_1gamma(self, s_bar, amp_s1, amp_s2):
+        num = np.log2((np.abs(amp_s2) + self.EPSILON) / (np.abs(amp_s1) + self.EPSILON))
+        denom = np.log2((s_bar + 2) / (s_bar + 1))
+        return 1 + num / denom
+
+    def get_gammas(self, sbar, sbar_amps, adj_amps):
+        gammas = []
+        for amp_s1, amp_s2 in zip(sbar_amps, adj_amps):
+            gammas.append(self.get_1gamma(sbar, amp_s1, amp_s2))
+        return gammas
+
+    def get_support(self, s, locs, amps, gammas):
+        cwt_length = self.cwt_.shape[1]
+        support = np.zeros(cwt_length)
+        t = np.arange(cwt_length)
+
+        for l, a, g in zip(locs, amps, gammas):
+            slope = a * ((s + 1) ** (g - 1))
+            support += slope * np.maximum(0, t - l)
+
+        return support
+
+    def get_detail(self, support, j):
+        support = self.pad_to_mult(support, 2 ** self.J)
+        _, detail = pywt.swt(support, 'bior2.4', 1, j)[0]
+        return detail
+
     def master_algorithm(self):
         self.set_cwt_()
         self.set_dictionary()
@@ -166,10 +204,16 @@ class TransientDetector:
 
         S1_atom_locs, S1_atom_amps = self.get_atoms(self.S1)
         self.set_J()
+
+        details_list = []
         for j in range(1, self.J + 1):
             Ij = self.get_Ij(j)
             sbar = self.get_scale_least_peaks(Ij)
             sbar_locs, sbar_amps = self.get_atoms(sbar, search_COIs=S1_atom_locs)
+            adj_locs, adj_amps = self.get_atoms(sbar + 1, search_COIs=S1_atom_locs)
+            gammas = self.get_gammas(sbar, sbar_amps, adj_amps)
+            support = self.get_support(sbar, sbar_locs, sbar_amps, gammas)
+            details_list.append(self.get_detail(support, j))
 
 
 # Testing and debugging
