@@ -19,6 +19,7 @@ class TransientDetector:
         self.SUPPORT = int()
         self.PAD_WIDTH = int()
         self.S1 = int()
+        self.J = int()
         self.TUNING_COEF = 0.659659659659660
         self.EPSILON = 1e-10
 
@@ -129,6 +130,29 @@ class TransientDetector:
 
         return atom_locs, atom_amps
 
+    def set_J(self):
+        self.J = int(np.floor(np.log2(self.S) + 0.5))
+
+    def get_Ij(self, j):
+        Ij = []
+        i = 1
+        while i < self.S:
+            condition = np.floor(np.log2(i) + 0.5)
+            if condition == j:
+                Ij.append(i - 1)  # Subtract one to convert to index number.
+            elif condition > j:
+                break
+            i += 1
+        return Ij
+
+    def get_scale_least_peaks(self, Ij):
+        lowest = np.inf
+        for ij in Ij:
+            query = np.where(self.nMAX==ij)[0][0]
+            if query < lowest:
+                lowest = int(query)
+        return self.nMAX[lowest]
+
     def master_algorithm(self):
         self.set_cwt_()
         self.set_dictionary()
@@ -136,8 +160,10 @@ class TransientDetector:
         self.S1 = self.nMAX[0]
 
         S1_atom_locs, S1_atom_amps = self.get_atoms(self.S1)
-        
-
+        self.set_J()
+        for j in range(1, self.J + 1):
+            Ij = self.get_Ij(j)
+            sbar_j = self.get_scale_least_peaks(Ij)
 
 # Testing and debugging
 def get_test_signal(N=2000, enable_noise=False):
