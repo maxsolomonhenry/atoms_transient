@@ -19,6 +19,8 @@ class TransientDetector:
         self.SUPPORT = int()
         self.PAD_WIDTH = int()
         self.S1 = int()
+        self.TUNING_COEF = 0.659659659659660
+        self.EPSILON = 1e-10
 
     @staticmethod
     def get_ramp(t0=1000):
@@ -82,6 +84,7 @@ class TransientDetector:
     def set_dictionary(self):
         t0 = int(self.PAD_WIDTH)
         ramp = self.get_ramp(t0)
+        ramp = ramp/np.max(ramp) * self.TUNING_COEF
         ramp_cwt, _ = pywt.cwt(ramp, range(1, self.S + 1), self.wavelet_type)
 
         for s in range(self.S):
@@ -104,6 +107,9 @@ class TransientDetector:
         M_l, heights = self.get_sorted_peaks(cwt_1scale)
         N_l = M_l.size
 
+        atom_locs = []
+        atom_amps = []
+
         k = 0
 
         for i in range(N_l):
@@ -111,8 +117,16 @@ class TransientDetector:
             extract = cwt_1scale[l:u]
             amplitude = self.least_squares(extract, self.dictionary[s])
 
-        atom_locs = None
-        atom_amps = None
+            # if True:
+            #     plt.plot(extract)
+            #     plt.plot(self.dictionary[s])
+            #     plt.show()
+
+            if amplitude > self.EPSILON:
+                atom_locs.append(M_l[i])
+                atom_amps.append(amplitude)
+                cwt_1scale[l:u] -= extract
+
         return atom_locs, atom_amps
 
     def master_algorithm(self):
@@ -121,9 +135,8 @@ class TransientDetector:
         self.set_nMAX()
         self.S1 = self.nMAX[0]
 
-        if True:
-            self.S1 = 30
         S1_atom_locs, S1_atom_amps = self.get_atoms(self.S1)
+        
 
 
 # Testing and debugging
