@@ -328,16 +328,17 @@ def test(use_real_audio=False):
         x, _ = get_audio('glock_demo.wav')
     else:
         x = get_test_signal()
-        x = np.concatenate
     td = TransientDetector(x)
-    td.TUNING_COEF=1
+    # td.TUNING_COEF=1
     td.master_algorithm()
     plt.plot(td.y)
     plt.title('Extracted transient')
     plt.xlabel('time index')
+    plt.ylim([-5, 5])
     plt.show()
 
 
+
 if __name__ == '__main__':
-    test(use_real_audio=False)
+    test(use_real_audio=True)
     # notebook_test(noise=0.05, plot_x=True, repeats=4, exponential=True, freq=0.005)
