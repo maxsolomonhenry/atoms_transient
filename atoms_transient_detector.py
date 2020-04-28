@@ -8,20 +8,25 @@ from matplotlib import pyplot as plt
 
 
 class TransientDetector:
-    def __init__(self, x, num_scales=65, wavelet_type='gaus6'):
+    def __init__(self, x, fs=44100, num_scales=100, wavelet_type='gaus6', swt_wavelet_type='bior2.4'):
         self.x = x
+        self.fs = fs
         self.S = num_scales
         self.wavelet_type = wavelet_type
 
+        self.swt_wavelet_type = swt_wavelet_type
         self.cwt_ = np.array([])
         self.nMAX = np.array([])
+        self.y = np.array([])
         self.dictionary = []
         self.SUPPORT = int()
         self.PAD_WIDTH = int()
         self.S1 = int()
         self.J = int()
+        self.THRESH_COEF = 0.75
         self.TUNING_COEF = 0.659659659659660
         self.EPSILON = 1e-10
+        self.swt_buffer_length = 0
 
     @staticmethod
     def get_ramp(t0=1000):
@@ -45,50 +50,41 @@ class TransientDetector:
         return float(np.dot(a[None, :], b[:, None]) / np.dot(b[None, :], b[:, None]))
 
     @staticmethod
-    def pad_to_mult(support, mult):
-        if len(support) % mult == 0:
-            return support
-        else:
-            buffer = mult - (len(support) % mult)
-            return np.concatenate((support, np.zeros(buffer)))
+    def get_iswt_coeffs(approx, detail_bands):
+        # Note: all but top-level approximation is ignored in inverse SWT.
+        iswt_coeffs =[]
+        num_bands = len(detail_bands)
 
-    def set_wavelet_info(self):
-        wavelet = pywt.ContinuousWavelet(self.wavelet_type)
-        self.SUPPORT = wavelet.upper_bound - wavelet.lower_bound
-        self.PAD_WIDTH = self.SUPPORT * (self.S + 1)
+        for i in range(num_bands):
+            rev_index = num_bands - i - 1
+            iswt_coeffs.append([approx, detail_bands[rev_index]])
+        return iswt_coeffs
 
-    def apply_pad_x(self):
-        self.x = pywt.pad(self.x, self.PAD_WIDTH, 'antireflect')
+    def master_algorithm(self):
+        self.set_cwt_()
+        self.set_dictionary()
+        self.set_nMAX()
+        self.S1 = self.nMAX[0]
 
-    def undo_boundary_effect(self, cwt_):
-        for s in range(self.S):
-            boundary = int(self.SUPPORT * (s + 1))
-            cwt_[s, :boundary] *= 0
-            cwt_[s, -boundary:] *= 0
-        return cwt_
+        # Gather "master atoms" locations and fitted amplitudes.
+        S1_atom_locs, S1_atom_amps = self.get_atoms(self.S1)
+        self.set_J()
+
+        # Collect detail bands for 1, ..., J
+        detail_bands = self.get_detail_bands(S1_atom_locs)
+        approximation = self.get_approximation(self.x, self.J)
+
+        iswt_coeffs = self.get_iswt_coeffs(approximation, detail_bands)
+        self.y = pywt.iswt(iswt_coeffs, self.swt_wavelet_type)
+
+        # Remove padding.
+        self.y = self.y[self.PAD_WIDTH: -(self.PAD_WIDTH + self.swt_buffer_length)]
 
     def set_cwt_(self):
         self.set_wavelet_info()
         self.apply_pad_x()
         cwt_, _ = pywt.cwt(self.x, range(1, self.S + 1), self.wavelet_type)
         self.cwt_ = self.undo_boundary_effect(cwt_)
-
-    def get_peaks_locs(self, cwt_1scale):
-        threshold = self.get_universal_threshold(cwt_1scale)
-        return scipy.signal.find_peaks(np.abs(cwt_1scale), height=threshold)
-
-    def get_num_peaks_one(self, cwt_1scale):
-        return self.get_peaks_locs(cwt_1scale)[0].size
-
-    def get_num_peaks(self):
-        num_peaks = []
-        for s in range(self.S):
-            num_peaks.append(self.get_num_peaks_one(self.cwt_[s, :]))
-        return np.asarray(num_peaks)
-
-    def set_nMAX(self):
-        num_peaks_array = self.get_num_peaks()
-        self.nMAX = np.argsort(num_peaks_array)
 
     def set_dictionary(self):
         t0 = int(self.PAD_WIDTH)
@@ -99,6 +95,105 @@ class TransientDetector:
         for s in range(self.S):
             width = int(np.floor(self.SUPPORT * (s + 1) / 2))
             self.dictionary.append(ramp_cwt[s, t0 - width + 1:t0 + width + 1])
+
+    def set_nMAX(self):
+        num_peaks_array = self.get_num_peaks()
+        self.nMAX = np.argsort(num_peaks_array)
+
+    def get_atoms(self, s, search_COIs=None):
+        cwt_1scale = copy.deepcopy(self.cwt_[s, :])
+        M_l, heights = self.get_sorted_peaks(cwt_1scale)
+        N_l = M_l.size
+
+        atom_locs = []
+        atom_amps = []
+
+        threshold = np.sqrt(np.dot(cwt_1scale, cwt_1scale)/(s + 1))
+
+        for i in range(N_l):
+            l, u = self.get_extract_bounds(s, M_l[i])
+            extract = cwt_1scale[l:u]
+            amplitude = self.least_squares(extract, self.dictionary[s])
+
+            if search_COIs is None:
+                is_in_COI = True
+            else:
+                is_in_COI = self.check_in_COI(s, M_l[i], search_COIs)
+
+            if (np.abs(amplitude) > threshold) & is_in_COI:
+                atom_locs.append(M_l[i])
+                atom_amps.append(amplitude)
+                cwt_1scale[l:u] -= extract
+
+        return atom_locs, atom_amps
+
+    def set_J(self):
+        self.J = int(np.floor(np.log2(self.S) + 0.5))
+
+    def get_detail_bands(self, S1_atom_locs):
+        detail_bands = []
+        for j in range(1, self.J + 1):
+            Ij = self.get_Ij(j)
+            sbar = self.get_scale_least_peaks(Ij)
+            sbar_locs, sbar_amps = self.get_atoms(sbar, search_COIs=S1_atom_locs)
+            adj_locs, adj_amps = self.get_atoms(sbar + 1, search_COIs=S1_atom_locs)
+            gammas = self.get_gammas(sbar, sbar_amps, adj_amps)
+            support = self.get_support(sbar, sbar_locs, sbar_amps, gammas)
+            detail_bands.append(self.get_detail(support, j))
+        return detail_bands
+
+    def get_detail(self, support, j):
+        support = self.pad_to_mult(support, 2 ** (self.J + 1))
+        _, detail = pywt.swt(support, self.swt_wavelet_type, 1, j-1)[0]
+        return detail
+
+    def get_approximation(self, signal, level):
+        buffer = self.pad_to_mult(signal, 2 ** (level + 1))
+        approximation, _ = pywt.swt(buffer, self.swt_wavelet_type, 1, level-1)[0]
+        return approximation
+
+    def pad_to_mult(self, support, mult):
+        if len(support) % mult == 0:
+            return support
+        else:
+            self.swt_buffer_length = mult - (len(support) % mult)
+            return pywt.pad(support, (0, self.swt_buffer_length), mode='smooth')
+            # return np.concatenate((support, np.zeros(self.swt_buffer_length)))
+
+    def set_wavelet_info(self):
+        wavelet = pywt.ContinuousWavelet(self.wavelet_type)
+        self.SUPPORT = wavelet.upper_bound - wavelet.lower_bound
+        self.PAD_WIDTH = int(self.SUPPORT * (self.S + 1))
+
+    def apply_pad_x(self):
+        self.x = pywt.pad(self.x, self.PAD_WIDTH, 'antireflect')
+
+    def undo_boundary_effect(self, cwt_):
+        for s in range(self.S):
+            boundary = int(self.SUPPORT * (s + 2))
+            cwt_[s, :boundary] *= 0
+            cwt_[s, -boundary:] *= 0
+        return cwt_
+
+    def get_peaks_locs(self, cwt_1scale):
+        threshold = self.THRESH_COEF * self.get_universal_threshold(cwt_1scale)
+
+        # if True:
+        #     locs = scipy.signal.find_peaks(np.abs(cwt_1scale), height=threshold, distance=int(self.fs/100))[0]
+        #     plt.plot(cwt_1scale)
+        #     plt.scatter(locs, cwt_1scale[locs.astype('int')], c='m')
+        #     plt.show()
+
+        return scipy.signal.find_peaks(np.abs(cwt_1scale), height=threshold, distance=int(self.fs/100))
+
+    def get_num_peaks_one(self, cwt_1scale):
+        return self.get_peaks_locs(cwt_1scale)[0].size
+
+    def get_num_peaks(self):
+        num_peaks = []
+        for s in range(self.S):
+            num_peaks.append(self.get_num_peaks_one(self.cwt_[s, :]))
+        return np.asarray(num_peaks)
 
     def get_sorted_peaks(self, cwt_1scale):
         locs_heights = self.get_peaks_locs(cwt_1scale)
@@ -113,41 +208,6 @@ class TransientDetector:
 
     def check_in_COI(self, s, query_location, S1_atom_locs):
         return any(np.abs(query_location - tk) < self.SUPPORT * (s + 1) for tk in S1_atom_locs)
-
-    def get_atoms(self, s, search_COIs=None):
-        cwt_1scale = copy.deepcopy(self.cwt_[s, :])
-        M_l, heights = self.get_sorted_peaks(cwt_1scale)
-        N_l = M_l.size
-
-        atom_locs = []
-        atom_amps = []
-
-        k = 0
-
-        for i in range(N_l):
-            l, u = self.get_extract_bounds(s, M_l[i])
-            extract = cwt_1scale[l:u]
-            amplitude = self.least_squares(extract, self.dictionary[s])
-
-            if search_COIs is None:
-                is_in_COI = True
-            else:
-                is_in_COI = self.check_in_COI(s, M_l[i], search_COIs)
-
-            # if True:
-            #     plt.plot(extract)
-            #     plt.plot(self.dictionary[s])
-            #     plt.show()
-
-            if (amplitude > self.EPSILON) & is_in_COI:
-                atom_locs.append(M_l[i])
-                atom_amps.append(amplitude)
-                cwt_1scale[l:u] -= extract
-
-        return atom_locs, atom_amps
-
-    def set_J(self):
-        self.J = int(np.floor(np.log2(self.S) + 0.5))
 
     def get_Ij(self, j):
         Ij = []
@@ -191,30 +251,6 @@ class TransientDetector:
 
         return support
 
-    def get_detail(self, support, j):
-        support = self.pad_to_mult(support, 2 ** self.J)
-        _, detail = pywt.swt(support, 'bior2.4', 1, j)[0]
-        return detail
-
-    def master_algorithm(self):
-        self.set_cwt_()
-        self.set_dictionary()
-        self.set_nMAX()
-        self.S1 = self.nMAX[0]
-
-        S1_atom_locs, S1_atom_amps = self.get_atoms(self.S1)
-        self.set_J()
-
-        details_list = []
-        for j in range(1, self.J + 1):
-            Ij = self.get_Ij(j)
-            sbar = self.get_scale_least_peaks(Ij)
-            sbar_locs, sbar_amps = self.get_atoms(sbar, search_COIs=S1_atom_locs)
-            adj_locs, adj_amps = self.get_atoms(sbar + 1, search_COIs=S1_atom_locs)
-            gammas = self.get_gammas(sbar, sbar_amps, adj_amps)
-            support = self.get_support(sbar, sbar_locs, sbar_amps, gammas)
-            details_list.append(self.get_detail(support, j))
-
 
 # Testing and debugging
 def get_test_signal(N=2000, enable_noise=False):
@@ -226,15 +262,23 @@ def get_test_signal(N=2000, enable_noise=False):
     return ramp / np.max(ramp)
 
 
-def test():
-    x = get_test_signal()
+def get_audio(filename):
+    fs, x = scipy.io.wavfile.read(filename)
+    norm_x = x/np.max(x)
+    return norm_x, fs
+
+
+def test(use_real_audio=False):
+    if use_real_audio:
+        x, _ = get_audio('glock_demo.wav')
+    else:
+        x = get_test_signal()
     td = TransientDetector(x)
     td.master_algorithm()
-    # for s in range(5):
-    #     plt.plot(td.dictionary[s])
-    #     plt.plot(np.floor(len(td.dictionary[s])/2), 0, '*')
-    #     plt.show()
-    return
+    plt.plot(td.y)
+    plt.title('Extracted transient')
+    plt.xlabel('time index')
+    plt.show()
 
 
 if __name__ == '__main__':
