@@ -132,25 +132,46 @@ class TransientDetector:
 
     def get_detail_bands(self, S1_atom_locs):
         detail_bands = []
+
         for j in range(1, self.J + 1):
             Ij = self.get_Ij(j)
-            sbar = self.get_scale_least_peaks(Ij)
+
+            sbar = self.get_scale_with_least_peaks(Ij)
             sbar_locs, sbar_amps = self.get_atoms(sbar, search_COIs=S1_atom_locs)
             adj_locs, adj_amps = self.get_atoms(sbar + 1, search_COIs=S1_atom_locs)
             gammas = self.get_gammas(sbar, sbar_amps, adj_amps)
+
             support = self.get_support(sbar, sbar_locs, sbar_amps, gammas)
             detail_bands.append(self.get_detail(support, j))
         return detail_bands
 
+
     def get_detail(self, support, j):
-        support = self.pad_to_mult(support, 2 ** (self.J + 1))
-        _, detail = pywt.swt(support, self.swt_wavelet_type, 1, j-1)[0]
+        detail = self.get_swt(support, j, 'detail')
         return detail
 
     def get_approximation(self, signal, level):
-        buffer = self.pad_to_mult(signal, 2 ** (level + 1))
-        approximation, _ = pywt.swt(buffer, self.swt_wavelet_type, 1, level-1)[0]
-        return approximation
+        approx = self.get_swt(signal, level, 'approx')
+        return approx
+
+    def get_prepad_length(self, support):
+        return len(support) + 2 ** (self.J + 1) - (len(support) % 2 ** (self.J + 1))
+
+    def get_swt(self, signal, level, band_choice):
+        output = np.array([])
+        prepad_length = self.get_prepad_length(signal)
+
+        # Overpad to account for border effects.
+        signal = self.pad_to_mult(signal, 2 ** (self.J + 2))
+        approx, detail = pywt.swt(signal, self.swt_wavelet_type, 1, level)[0]
+
+        # Remove pad and choose output.
+        if band_choice == 'approx':
+            output = approx[:prepad_length]
+        elif band_choice == 'detail':
+            output = detail[:prepad_length]
+
+        return output
 
     def pad_to_mult(self, support, mult):
         if len(support) % mult == 0:
@@ -221,7 +242,7 @@ class TransientDetector:
             i += 1
         return Ij
 
-    def get_scale_least_peaks(self, Ij):
+    def get_scale_with_least_peaks(self, Ij):
         lowest = np.inf
         for ij in Ij:
             query = np.where(self.nMAX==ij)[0][0]
@@ -232,7 +253,7 @@ class TransientDetector:
     def get_1gamma(self, s_bar, amp_s1, amp_s2):
         num = np.log2((np.abs(amp_s2) + self.EPSILON) / (np.abs(amp_s1) + self.EPSILON))
         denom = np.log2((s_bar + 2) / (s_bar + 1))
-        return 1 + num / denom
+        return 1 + (num / denom)
 
     def get_gammas(self, sbar, sbar_amps, adj_amps):
         gammas = []
@@ -249,6 +270,7 @@ class TransientDetector:
             slope = a * ((s + 1) ** (g - 1))
             support += slope * np.maximum(0, t - l)
 
+        # support /= (s+1)
         return support
 
 
@@ -268,11 +290,31 @@ def get_audio(filename):
     return norm_x, fs
 
 
-def test(use_real_audio=False):
-    if use_real_audio:
-        x, _ = get_audio('glock_demo.wav')
+def simple_ramp(t, tk):
+    return (t - tk) * np.heaviside(t - tk, 1)
+
+
+def notebook_test(noise=0, plot_x=False, exponential=False, freq=None, repeats=0):
+    t = np.arange(2000)
+    x = simple_ramp(t, 1900)
+    x /= np.max(x)
+    if exponential:
+        x = np.concatenate((x, np.exp(-t/250)))
     else:
-        x = get_test_signal()
+        x = np.concatenate((x, np.arange(1999, 0, -1)/2000, np.zeros(1900)))
+
+    for i in range(repeats):
+        x = np.concatenate((x, x))
+
+    if freq is not None:
+        x *= np.cos(2 * np.pi * freq * np.arange(len(x)))
+
+    x += np.random.rand(len(x))*noise
+    if plot_x:
+        plt.plot(x)
+        plt.title('input signal')
+        plt.show()
+
     td = TransientDetector(x)
     td.master_algorithm()
     plt.plot(td.y)
@@ -281,5 +323,21 @@ def test(use_real_audio=False):
     plt.show()
 
 
+def test(use_real_audio=False):
+    if use_real_audio:
+        x, _ = get_audio('glock_demo.wav')
+    else:
+        x = get_test_signal()
+        x = np.concatenate
+    td = TransientDetector(x)
+    td.TUNING_COEF=1
+    td.master_algorithm()
+    plt.plot(td.y)
+    plt.title('Extracted transient')
+    plt.xlabel('time index')
+    plt.show()
+
+
 if __name__ == '__main__':
-    test()
+    test(use_real_audio=False)
+    # notebook_test(noise=0.05, plot_x=True, repeats=4, exponential=True, freq=0.005)
