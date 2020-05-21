@@ -13,4 +13,4 @@ reference:
 V. Bruni, S. Marconi, and D. Vitulano, “Time-scale atoms chains for transients detection 
     in audio signals,” IEEE Trans. Audio Speech Lang. Process., vol. 18, no. 3, pp. 420–433,
     Mar. 2010, doi: 10.1109/TASL.2009.2032623.
-<\pre>
+</pre>
